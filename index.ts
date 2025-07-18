@@ -3,7 +3,7 @@ config();
 
 import * as fs from "fs";
 import * as z from "zod";
-import clerkClient from "@clerk/clerk-sdk-node";
+import { clerkClient } from "@clerk/clerk-sdk-node";
 import ora, { Ora } from "ora";
 
 const SECRET_KEY = process.env.CLERK_SECRET_KEY;
@@ -111,22 +111,31 @@ async function processUserToClerk(userData: User, spinner: Ora) {
 		await createUser(parsedUserData.data);
 
 		migrated++;
-	} catch (error) {
-		if (error.status === 422) {
-			appendLog({ userId: userData.userId, ...error });
-			alreadyExists++;
-			return;
+	} catch (error: unknown) {
+		// Clerk errors are usually objects with status property
+		if (
+			typeof error === "object" &&
+			error !== null &&
+			"status" in error &&
+			typeof (error as any).status === "number"
+		) {
+			const err = error as { status: number;[key: string]: any };
+			if (err.status === 422) {
+				appendLog({ userId: userData.userId, ...err });
+				alreadyExists++;
+				return;
+			}
+			if (err.status === 429) {
+				spinner.text = `${txt} - rate limit reached, waiting for ${RETRY_DELAY} ms`;
+				await rateLimitCooldown();
+				spinner.text = txt;
+				return processUserToClerk(userData, spinner);
+			}
+			appendLog({ userId: userData.userId, ...err });
+		} else {
+			// Unknown error type
+			appendLog({ userId: userData.userId, error: String(error) });
 		}
-
-		// Keep cooldown in case rate limit is reached as a fallback if the thread blocking fails
-		if (error.status === 429) {
-			spinner.text = `${txt} - rate limit reached, waiting for ${RETRY_DELAY} ms`;
-			await rateLimitCooldown();
-			spinner.text = txt;
-			return processUserToClerk(userData, spinner);
-		}
-
-		appendLog({ userId: userData.userId, ...error });
 	}
 }
 
